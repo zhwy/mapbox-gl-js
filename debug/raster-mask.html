@@ -1,0 +1,144 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Mapbox GL JS - Raster Mask Test</title>
+        <meta charset="utf-8" />
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0, user-scalable=no"
+        />
+        <link rel="stylesheet" href="../dist/mapbox-gl.css" />
+        <style>
+            body {
+                margin: 0;
+                padding: 0;
+            }
+            html,
+            body,
+            #map {
+                height: 100%;
+            }
+            #controls {
+                position: absolute;
+                top: 10px;
+                left: 10px;
+                padding: 10px;
+                background: rgba(255, 255, 255, 0.9);
+                border-radius: 5px;
+            }
+        </style>
+    </head>
+
+    <body>
+        <div id="map"></div>
+        <div id="controls">
+            <label
+                ><input id="mask-toggle" type="checkbox" checked /> Enable
+                Raster Mask</label
+            >
+        </div>
+
+        <script src="../dist/mapbox-gl-dev.js"></script>
+        <script src="./access_token_generated.js"></script>
+        <script type="module">
+            const map = (window.map = new mapboxgl.Map({
+                container: "map",
+                devtools: true,
+                zoom: 10,
+                center: [-74.006, 40.7128], // New York
+                style: "mapbox://styles/mapbox/streets-v11",
+            }));
+
+            map.addControl(new mapboxgl.NavigationControl());
+
+            map.on("load", function () {
+                const maskPolygon = {
+                    type: "FeatureCollection",
+                    features: [
+                        {
+                            type: "Feature",
+                            geometry: {
+                                type: "MultiPolygon",
+                                coordinates: [
+                                    [
+                                        [
+                                            [-74.02, 40.7],
+                                            [-73.93, 40.7],
+                                            [-73.93, 40.785],
+                                            [-74.02, 40.785],
+                                            [-74.02, 40.7],
+                                        ],
+                                        [
+                                            [-74.0, 40.715],
+                                            [-73.955, 40.715],
+                                            [-73.955, 40.77],
+                                            [-74.0, 40.77],
+                                            [-74.0, 40.715],
+                                        ],
+                                    ],
+                                    [
+                                        [
+                                            [-74.06, 40.74],
+                                            [-74.08, 40.72],
+                                            [-74.04, 40.72],
+                                            [-74.06, 40.74],
+                                        ],
+                                    ],
+                                ],
+                            },
+                        },
+                    ],
+                };
+
+                // Add mask source
+                map.addSource("mask-source", {
+                    type: "geojson",
+                    data: maskPolygon,
+                });
+
+                // Add mask layer (initially hidden)
+                map.addLayer({
+                    id: "mask-layer",
+                    type: "fill",
+                    source: "mask-source",
+                    paint: {
+                        "fill-color": "rgba(0,0,0,0)", // 初始透明
+                        "fill-opacity": 1, // 不能通过透明度控制显示，因为需要保留填充颜色以启用遮罩
+                        // "fill-outline-color": "#ff0000",
+                    },
+                });
+
+                // Add satellite raster layer with mask
+                map.addLayer({
+                    id: "satellite-masked",
+                    type: "raster",
+                    source: {
+                        type: "raster",
+                        tiles: [
+                            "https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{z}/{x}/{y}?access_token=" +
+                                mapboxgl.accessToken,
+                        ],
+                        tileSize: 512,
+                    },
+                    metadata: {
+                        "raster-mask-layer": "mask-layer",
+                    },
+                    paint: {
+                        "raster-opacity": 0.8,
+                    },
+                });
+
+                // Controls
+                document
+                    .getElementById("mask-toggle")
+                    .addEventListener("change", function (e) {
+                        const layer = map.getLayer("satellite-masked");
+                        layer.metadata["raster-mask-layer"] = e.target.checked
+                            ? "mask-layer"
+                            : "";
+                        map.triggerRepaint();
+                    });
+            });
+        </script>
+    </body>
+</html>

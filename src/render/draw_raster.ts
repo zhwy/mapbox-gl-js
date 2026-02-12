@@ -24,8 +24,10 @@ import {COLOR_MIX_FACTOR} from '../style/style_layer/raster_style_layer';
 import RasterArrayTile from '../source/raster_array_tile';
 import RasterArrayTileSource from '../source/raster_array_tile_source';
 import ColorMode from '../gl/color_mode';
+import fill, { drawFillTiles } from './draw_fill';
 
 import type Transform from '../geo/transform';
+import type FillStyleLayer from '../style/style_layer/fill_style_layer';
 import type {OverscaledTileID} from '../source/tile_id';
 import type Tile from '../source/tile';
 import type Context from '../gl/context';
@@ -37,6 +39,7 @@ import type {UserManagedTexture} from './texture';
 import type {DynamicDefinesType} from '../render/program/program_uniforms';
 import type VertexBuffer from '../gl/vertex_buffer';
 import type {CrossTileID, VariableOffset} from '../symbol/placement';
+import Color from '../style-spec/util/color';
 
 export default drawRaster;
 
@@ -66,6 +69,13 @@ function drawRaster(painter: Painter, sourceCache: SourceCache, layer: RasterSty
 
     const rasterOpacity = layer.paint.get('raster-opacity');
     if (rasterOpacity === 0) return;
+
+    // Check for mask layer in metadata
+    const maskLayerId = layer.metadata?.['raster-mask-layer'] as string | undefined;
+    let maskStencilMode: StencilMode | undefined;
+    if (maskLayerId) {
+        maskStencilMode = drawMaskLayer(painter, maskLayerId, tileIDs);
+    }
 
     const isGlobeProjection = painter.transform.projection.name === 'globe';
     const renderingWithElevation = layer.paint.get('raster-elevation') !== 0.0;
@@ -157,9 +167,14 @@ function drawRaster(painter: Painter, sourceCache: SourceCache, layer: RasterSty
                 projMatrix = painter.transform.calculateProjMatrix(unwrappedTileID, align);
             }
 
-            const stencilMode = painter.terrain && renderingToTexture ?
+            const stencilMode = maskStencilMode || (painter.terrain && renderingToTexture ?
                 painter.terrain.stencilModeForRTTOverlap(coord) :
-                stencilModes[coord.overscaledZ];
+                stencilModes[coord.overscaledZ]);
+
+            if (maskStencilMode) {
+                // make sure stencil test is enabled if we're applying a mask stencil mode
+                painter.context.stencilTest.set(true);
+            }
 
             const rasterFadeDuration = isInitialLoad ? 0 : layer.paint.get('raster-fade-duration');
 
@@ -275,9 +290,10 @@ function drawRaster(painter: Painter, sourceCache: SourceCache, layer: RasterSty
                 if (renderingToTexture || !isGlobeProjection) {
                     if (source.boundsBuffer && source.boundsSegments) program.draw(
 
-                        painter, gl.TRIANGLES, depthMode, StencilMode.disabled, colorMode, CullFaceMode.disabled,
+                        painter, gl.TRIANGLES, depthMode, maskStencilMode || StencilMode.disabled, colorMode, CullFaceMode.disabled,
                         uniformValues, layer.id, source.boundsBuffer,
                         painter.quadTriangleIndexBuffer, source.boundsSegments);
+
                 } else if (elevatedGlobeVertexBuffer && elevatedGlobeIndexBuffer) {
                     const segments = tr.zoom <= GLOBE_ZOOM_THRESHOLD_MIN ?
                         source.elevatedGlobeSegments :
@@ -285,9 +301,10 @@ function drawRaster(painter: Painter, sourceCache: SourceCache, layer: RasterSty
                     if (segments) {
                         program.draw(
 
-                            painter, gl.TRIANGLES, depthMode, StencilMode.disabled, colorMode, cullFaceMode,
+                            painter, gl.TRIANGLES, depthMode, maskStencilMode || StencilMode.disabled, colorMode, cullFaceMode,
                             uniformValues, layer.id, elevatedGlobeVertexBuffer,
                             elevatedGlobeIndexBuffer, segments);
+
                     }
                 }
             } else if (renderingElevatedOnGlobe) {
@@ -303,7 +320,7 @@ function drawRaster(painter: Painter, sourceCache: SourceCache, layer: RasterSty
                     assert(indexBuffer);
                     assert(segments);
 
-                    program.draw(painter, gl.TRIANGLES, depthMode, elevatedStencilMode || stencilMode, painter.colorModeForRenderPass(), cullFaceMode, uniformValues, layer.id, buffer, indexBuffer, segments);
+                    program.draw(painter, gl.TRIANGLES, depthMode, elevatedStencilMode || maskStencilMode || stencilMode, painter.colorModeForRenderPass(), cullFaceMode, uniformValues, layer.id, buffer, indexBuffer, segments);
                 }
             } else if (renderingElevatedOnTerrain) {
                 depthMode = new DepthMode(gl.LEQUAL, DepthMode.ReadWrite, painter.depthRangeFor3D);
@@ -313,12 +330,12 @@ function drawRaster(painter: Painter, sourceCache: SourceCache, layer: RasterSty
                 // 2-pass rendering in case layer is not fully opaque and we are looking at higher pitch angles
                 const pitchThresholdForTwoPassRendering = 20.0;
                 if (tr.pitch > pitchThresholdForTwoPassRendering) {
-                    program.draw(painter, gl.TRIANGLES, depthMode, StencilMode.disabled, ColorMode.disabled, CullFaceMode.frontCCW,
+                    program.draw(painter, gl.TRIANGLES, depthMode, maskStencilMode || StencilMode.disabled, ColorMode.disabled, CullFaceMode.frontCCW,
                         uniformValues, layer.id, painter.terrain.gridBuffer,
                         painter.terrain.gridIndexBuffer, painter.terrain.gridSegments);
                 }
 
-                program.draw(painter, gl.TRIANGLES, depthMode, stencilMode, colorMode, CullFaceMode.backCCW,
+                program.draw(painter, gl.TRIANGLES, depthMode, maskStencilMode || stencilMode, colorMode, CullFaceMode.backCCW,
                     uniformValues, layer.id, painter.terrain.gridBuffer,
                     painter.terrain.gridIndexBuffer, painter.terrain.gridSegments);
             } else {
@@ -356,7 +373,9 @@ function drawRaster(painter: Painter, sourceCache: SourceCache, layer: RasterSty
         drawTiles(coords, CullFaceMode.disabled, undefined);
     }
 
-    painter.resetStencilClippingMasks();
+    if (!maskStencilMode) {
+        painter.resetStencilClippingMasks();
+    }
 }
 
 function drawPole(isNorth: boolean, coord: OverscaledTileID | null | undefined, painter: Painter, sourceCache: SourceCache, layer: RasterStyleLayer, emissiveStrength: number, rasterConfig: RasterConfig, cullFaceMode: CullFaceMode, stencilMode: StencilMode) {
@@ -569,4 +588,105 @@ function configureRaster(
         defines,
         resampling
     };
+}
+
+/**
+ * Draw mask layer to stencil buffer for raster masking
+ */
+function drawMaskLayer(painter: Painter, maskLayerId: string, tileIDs: Array<OverscaledTileID>): StencilMode | undefined {
+    const maskLayer = painter.style.getLayer(maskLayerId) as FillStyleLayer | undefined;
+    if (!maskLayer || maskLayer.type !== 'fill') {
+        console.warn(`Mask layer "${maskLayerId}" not found or not a fill layer`);
+        return undefined;
+    }
+
+    const maskSourceCache = painter.style.getLayerSourceCache(maskLayer);
+    if (!maskSourceCache) {
+        console.warn(`No source cache found for mask layer "${maskLayerId}"`);
+        return undefined;
+    }
+
+    const gl = painter.context.gl;
+
+    // Check stencil buffer availability
+    const stencilBits = gl.getParameter(gl.STENCIL_BITS);
+    if (stencilBits === 0) {
+        console.error('Stencil buffer not available! Cannot use mask functionality.');
+        return undefined;
+    }
+
+    // Allocate stencil ID
+    if (painter.nextStencilID + 1 > 256) painter.clearStencil();
+    const maskId = painter.nextStencilID++;
+
+    // Find overlapping mask tiles - use all visible mask tiles instead of forcing same tile IDs
+    const maskTiles: Array<OverscaledTileID> = maskSourceCache.getVisibleCoordinates().filter(coord => {
+        const tile = maskSourceCache.getTile(coord);
+        return tile && tile.hasData();
+    });
+
+    if (maskTiles.length === 0) return undefined;
+
+    // Create stencil mode for mask writing
+    const maskStencilWrite = new StencilMode(
+        {func: gl.ALWAYS, mask: 0xFF},
+        maskId,
+        0xFF,
+        gl.KEEP,
+        gl.KEEP,
+        gl.REPLACE
+    );
+
+    // Save original modes
+    const originalStencilMode = painter.context.stencilFunc.get();
+    const originalColorMode = painter.context.colorMask.get();
+
+    // Ensure stencil test is enabled
+    painter.context.stencilTest.set(true);
+
+    // Set up for stencil-only rendering
+    painter.context.setColorMode(ColorMode.disabled);
+    painter.context.setStencilMode(maskStencilWrite);
+
+    const pattern = maskLayer.paint.get('fill-pattern');
+    const color = maskLayer.paint.get('fill-color');
+    const opacity = maskLayer.paint.get('fill-opacity');
+    const pass = painter.opaquePassEnabledForLayer() &&
+        (!pattern.constantOr(1) &&
+        color.constantOr(Color.transparent).a === 1 &&
+        opacity.constantOr(0) === 1) ? 'opaque' : 'translucent';
+
+    const drawFillParams: any = {
+      painter,
+      sourceCache: maskSourceCache,
+      layer: maskLayer,
+      coords: maskTiles,
+      colorMode: ColorMode.disabled, // No color output, we're only interested in stencil updates
+      elevationType: "none",
+      terrainEnabled: false,
+      pass,
+    };
+    const mrt = painter.emissiveMode === 'mrt-fallback';
+
+    // Draw mask polygons to stencil buffer
+    drawFillTiles(drawFillParams, false, mrt, maskStencilWrite);
+
+    // Force enable stencil test for debugging
+    painter.context.stencilTest.set(true);
+
+    // Restore original modes
+    painter.context.colorMask.set(originalColorMode);
+    painter.context.stencilFunc.set(originalStencilMode);
+
+    // Return stencil read mode for raster rendering
+    const maskStencilRead = new StencilMode(
+        {func: gl.EQUAL, mask: 0xFF},
+        maskId,
+        0x00,
+        gl.KEEP,
+        gl.KEEP,
+        gl.KEEP
+    );
+
+    return maskStencilRead;
 }

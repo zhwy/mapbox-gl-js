@@ -341,7 +341,7 @@ function drawElevatedStructures(params: DrawFillParams) {
     draw(false);
 }
 
-function drawFillTiles(params: DrawFillParams, elevatedGeometry: boolean, multipleRenderTargets: boolean, stencilModeOverride?: StencilMode) {
+export function drawFillTiles(params: DrawFillParams, elevatedGeometry: boolean, multipleRenderTargets: boolean, stencilModeOverride?: StencilMode) {
     const {painter, sourceCache, layer, coords, colorMode, elevationType, terrainEnabled, pass} = params;
     const gl = painter.context.gl;
 
